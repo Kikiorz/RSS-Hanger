@@ -33,6 +33,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CompressedImage, JointState
 
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
@@ -170,7 +171,9 @@ def resolve_pretrained_path(ckpt_arg: str | None) -> Path:
 
 
 def load_policy(pretrained_dir: Path, device: str):
-    config = DiffusionConfig.from_pretrained(pretrained_dir)
+    config = PreTrainedConfig.from_pretrained(pretrained_dir)
+    if not isinstance(config, DiffusionConfig):
+        raise TypeError(f"Checkpoint at {pretrained_dir} is not a diffusion policy: {type(config).__name__}")
     config.device = device
 
     policy = DiffusionPolicy.from_pretrained(pretrained_name_or_path=str(pretrained_dir), config=config)
