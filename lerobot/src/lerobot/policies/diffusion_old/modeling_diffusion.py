@@ -43,9 +43,6 @@ from lerobot.policies.utils import (
 )
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 
-OBS_BASE_VELOCITY = "observation.base_velocity"
-OBS_EFFORT = "observation.effort"
-
 
 class DiffusionPolicy(PreTrainedPolicy):
     """
@@ -88,10 +85,6 @@ class DiffusionPolicy(PreTrainedPolicy):
             OBS_STATE: deque(maxlen=self.config.n_obs_steps),
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
-        if self.config.use_base and OBS_BASE_VELOCITY in self.config.input_features:
-            self._queues[OBS_BASE_VELOCITY] = deque(maxlen=self.config.n_obs_steps)
-        if self.config.use_torque and OBS_EFFORT in self.config.input_features:
-            self._queues[OBS_EFFORT] = deque(maxlen=self.config.n_obs_steps)
         if self.config.image_features:
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
@@ -178,8 +171,6 @@ class DiffusionModel(nn.Module):
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature.shape[0]
-        global_cond_dim += self._optional_input_dim(OBS_BASE_VELOCITY, self.config.use_base)
-        global_cond_dim += self._optional_input_dim(OBS_EFFORT, self.config.use_torque)
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -214,51 +205,6 @@ class DiffusionModel(nn.Module):
             self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
         else:
             self.num_inference_steps = config.num_inference_steps
-
-    def _optional_input_dim(self, feature_key: str, enabled: bool) -> int:
-        if not enabled:
-            return 0
-
-        feature = self.config.input_features.get(feature_key)
-        if feature is None:
-            return 0
-
-        return feature.shape[0]
-
-    def _get_optional_observation(
-        self, batch: dict[str, Tensor], feature_key: str, enabled: bool
-    ) -> Tensor | None:
-        if not enabled:
-            return None
-
-        feature = self.config.input_features.get(feature_key)
-        if feature is None:
-            return None
-
-        if feature_key in batch:
-            return batch[feature_key]
-
-        batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
-        return torch.zeros(
-            (batch_size, n_obs_steps, feature.shape[0]),
-            device=batch[OBS_STATE].device,
-            dtype=batch[OBS_STATE].dtype,
-        )
-
-    def _prepare_proprio(self, batch: dict[str, Tensor]) -> Tensor:
-        proprio_feats = []
-
-        base_velocity = self._get_optional_observation(batch, OBS_BASE_VELOCITY, self.config.use_base)
-        if base_velocity is not None:
-            proprio_feats.append(base_velocity)
-
-        proprio_feats.append(batch[OBS_STATE])
-
-        effort = self._get_optional_observation(batch, OBS_EFFORT, self.config.use_torque)
-        if effort is not None:
-            proprio_feats.append(effort)
-
-        return torch.cat(proprio_feats, dim=-1)
 
     # ========= inference  ============
     def conditional_sample(
@@ -298,9 +244,9 @@ class DiffusionModel(nn.Module):
         return sample
 
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
-        """Encode image features and concatenate them together with proprioceptive inputs."""
+        """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
-        global_cond_feats = [self._prepare_proprio(batch)]
+        global_cond_feats = [batch[OBS_STATE]]
         # Extract image features.
         if self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -379,18 +325,6 @@ class DiffusionModel(nn.Module):
         # Input validation.
         assert set(batch).issuperset({OBS_STATE, ACTION, "action_is_pad"})
         assert OBS_IMAGES in batch or OBS_ENV_STATE in batch
-        if self.config.use_base:
-            expected_base = self.config.input_features.get(OBS_BASE_VELOCITY)
-            if expected_base is not None:
-                actual_base = self._get_optional_observation(batch, OBS_BASE_VELOCITY, True)
-                assert actual_base is not None
-                assert actual_base.shape[-1] == expected_base.shape[0]
-        if self.config.use_torque:
-            expected_effort = self.config.input_features.get(OBS_EFFORT)
-            if expected_effort is not None:
-                actual_effort = self._get_optional_observation(batch, OBS_EFFORT, True)
-                assert actual_effort is not None
-                assert actual_effort.shape[-1] == expected_effort.shape[0]
         n_obs_steps = batch[OBS_STATE].shape[1]
         horizon = batch[ACTION].shape[1]
         assert horizon == self.config.horizon

@@ -1,38 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONWARNINGS="ignore"
 
-# ============== [DIFFUSION TRAINING] ==============
-# Diffusion Policy training script
-# Default config: use_base=true, use_torque=false
-# ==================================================
+# ============== [DIFFUSION TRAINING - OFFICIAL-LIKE] ==============
+# Keep this script as close as possible to DiffusionConfig defaults.
+# Task-specific overrides kept on purpose:
+# - use_base=true   (whole-body mobile base task)
+# - use_torque=false
+# Everything else is intentionally left to the policy defaults in
+# lerobot/policies/diffusion/configuration_diffusion.py.
+# In particular, this script does NOT force:
+# - ImageNet backbone initialization
+# - resize_shape / crop_ratio
+# - use_group_norm=False
+# ================================================================
 
-# Get script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Training configuration
+DATASET_NAME="${DATASET_NAME:-ACT-100-WHOLE-V30-fixed}"
+DATASET_ROOT="${DATASET_ROOT:-${PROJECT_ROOT}/data/${DATASET_NAME}}"
+
 USE_BASE="${USE_BASE:-true}"
 USE_TORQUE="${USE_TORQUE:-false}"
+DEVICE="${DEVICE:-cuda}"
+
 STEPS="${STEPS:-200000}"
 SAVE_FREQ="${SAVE_FREQ:-10000}"
 LOG_FREQ="${LOG_FREQ:-100}"
 EVAL_FREQ="${EVAL_FREQ:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
-WANDB_ENABLE="${WANDB_ENABLE:-true}"
-DEVICE="${DEVICE:-cuda}"
-PRETRAINED_BACKBONE_WEIGHTS="${PRETRAINED_BACKBONE_WEIGHTS:-ResNet18_Weights.IMAGENET1K_V1}"
-USE_GROUP_NORM="${USE_GROUP_NORM:-false}"
-RESIZE_SHAPE="${RESIZE_SHAPE:-224,224}"
-CROP_RATIO="${CROP_RATIO:-1.0}"
-COMPILE_MODEL="${COMPILE_MODEL:-false}"
+NUM_WORKERS="${NUM_WORKERS:-16}"
+WANDB_ENABLE="${WANDB_ENABLE:-false}"
 
-# Dataset configuration (using relative paths)
-DATASET_NAME="${DATASET_NAME:-ACT-100-WHOLE-V30-fixed}"
-DATASET_ROOT="${DATASET_ROOT:-${PROJECT_ROOT}/data/${DATASET_NAME}}"
-
-VARIANT_SUFFIX="base"
+VARIANT_SUFFIX="official-base"
 if [ "${USE_TORQUE}" = "true" ]; then
-  VARIANT_SUFFIX="${VARIANT_SUFFIX}-torque"
+  VARIANT_SUFFIX="official-base-torque"
 fi
 
 RUN_NAME="DP-${DATASET_NAME}-${VARIANT_SUFFIX}"
@@ -40,65 +43,62 @@ if [ -n "${RUN_TAG:-}" ]; then
   RUN_NAME="${RUN_NAME}-${RUN_TAG}"
 fi
 
-# Output configuration (using relative paths)
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/models/${RUN_NAME}}"
 JOB_NAME="${JOB_NAME:-${RUN_NAME}}"
 POLICY_REPO_ID="${POLICY_REPO_ID:-local/${RUN_NAME}}"
 WANDB_PROJECT="${WANDB_PROJECT:-DP-${DATASET_NAME}}"
 LOG_FILE="${LOG_FILE:-${SCRIPT_DIR}/${RUN_NAME}.log}"
 
-echo ""
+printf '\n'
 echo "========================================"
 echo "Training ${JOB_NAME}"
 echo "  policy: diffusion"
+echo "  dataset: ${DATASET_ROOT}"
+echo "  output: ${OUTPUT_DIR}"
 echo "  use_base: ${USE_BASE}"
 echo "  use_torque: ${USE_TORQUE}"
+echo "  device: ${DEVICE}"
 echo "  steps: ${STEPS}"
 echo "  save_freq: ${SAVE_FREQ}"
 echo "  eval_freq: ${EVAL_FREQ}"
 echo "  batch_size: ${BATCH_SIZE}"
-echo "  pretrained_backbone_weights: ${PRETRAINED_BACKBONE_WEIGHTS}"
-echo "  use_group_norm: ${USE_GROUP_NORM}"
-echo "  resize_shape: ${RESIZE_SHAPE}"
-echo "  crop_ratio: ${CROP_RATIO}"
-echo "  compile_model: ${COMPILE_MODEL}"
-echo "  Dataset: ${DATASET_ROOT}"
-echo "  Output: ${OUTPUT_DIR}"
-echo "  Log: ${LOG_FILE}"
+echo "  num_workers: ${NUM_WORKERS}"
+echo "  wandb.enable: ${WANDB_ENABLE}"
+echo "  policy defaults: backbone=None, group_norm=True, resize=None, crop_ratio=1.0"
+echo "  log: ${LOG_FILE}"
 echo "========================================"
-echo ""
+printf '\n'
 
-# Clear log file
 echo "Diffusion Training Log - $(date)" > "${LOG_FILE}"
 
-# Train diffusion policy (single GPU)
-python "${PROJECT_ROOT}/lerobot/src/lerobot/scripts/lerobot_train.py" \
-  --policy.type diffusion \
-  --dataset.repo_id "${DATASET_NAME}" \
-  --dataset.root "${DATASET_ROOT}" \
-  --dataset.video_backend pyav \
-  --output_dir "${OUTPUT_DIR}" \
-  --job_name "${JOB_NAME}" \
-  --policy.device "${DEVICE}" \
-  --policy.use_base "${USE_BASE}" \
-  --policy.use_torque "${USE_TORQUE}" \
-  --policy.pretrained_backbone_weights "${PRETRAINED_BACKBONE_WEIGHTS}" \
-  --policy.use_group_norm "${USE_GROUP_NORM}" \
-  --policy.resize_shape "[${RESIZE_SHAPE}]" \
-  --policy.crop_ratio "${CROP_RATIO}" \
-  --policy.compile_model "${COMPILE_MODEL}" \
-  --policy.repo_id "${POLICY_REPO_ID}" \
-  --policy.push_to_hub false \
-  --batch_size "${BATCH_SIZE}" \
-  --steps "${STEPS}" \
-  --log_freq "${LOG_FREQ}" \
-  --eval_freq "${EVAL_FREQ}" \
-  --save_freq "${SAVE_FREQ}" \
-  --wandb.enable "${WANDB_ENABLE}" \
-  --wandb.project "${WANDB_PROJECT}" \
-  "$@" 2>&1 | tee -a "${LOG_FILE}"
+CMD=(
+  python "${PROJECT_ROOT}/lerobot/src/lerobot/scripts/lerobot_train.py"
+  --policy.type diffusion
+  --dataset.repo_id "${DATASET_NAME}"
+  --dataset.root "${DATASET_ROOT}"
+  --dataset.video_backend pyav
+  --output_dir "${OUTPUT_DIR}"
+  --job_name "${JOB_NAME}"
+  --policy.device "${DEVICE}"
+  --policy.use_base "${USE_BASE}"
+  --policy.use_torque "${USE_TORQUE}"
+  --policy.repo_id "${POLICY_REPO_ID}"
+  --policy.push_to_hub false
+  --batch_size "${BATCH_SIZE}"
+  --steps "${STEPS}"
+  --log_freq "${LOG_FREQ}"
+  --eval_freq "${EVAL_FREQ}"
+  --save_freq "${SAVE_FREQ}"
+  --num_workers "${NUM_WORKERS}"
+  --wandb.enable "${WANDB_ENABLE}"
+  --wandb.project "${WANDB_PROJECT}"
+)
 
-echo ""
+{
+  "${CMD[@]}" "$@"
+} 2>&1 | tee -a "${LOG_FILE}"
+
+printf '\n'
 echo "========================================"
 echo "Training completed!"
 echo "  Model: ${OUTPUT_DIR}"

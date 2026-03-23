@@ -154,10 +154,6 @@ class DiffusionConfig(PreTrainedConfig):
     # Loss computation
     do_mask_loss_for_padding: bool = False
 
-    # Optional proprio inputs.
-    use_base: bool = False
-    use_torque: bool = False
-
     # Training presets
     optimizer_lr: float = 1e-4
     optimizer_betas: tuple = (0.95, 0.999)
