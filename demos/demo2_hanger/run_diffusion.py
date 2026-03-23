@@ -213,6 +213,12 @@ def main():
         help=f"Path to pretrained_model directory or run directory (default: {DEFAULT_CKPT})",
     )
     parser.add_argument("--rate", type=float, default=10.0, help="Control frequency in Hz")
+    parser.add_argument(
+        "--num-inference-steps",
+        type=int,
+        default=None,
+        help="Override diffusion sampling steps at inference time (default: checkpoint / LeRobot default)",
+    )
     parser.add_argument("--use-torque", action="store_true", help="Feed real joint effort into observation.effort")
     parser.add_argument("--smoothing", type=float, default=0.3, help="EMA smoothing alpha")
     parser.add_argument("--no-smoothing", action="store_true", help="Disable EMA smoothing")
@@ -226,6 +232,12 @@ def main():
     pretrained_dir = resolve_pretrained_path(args.ckpt)
     policy, preprocessor, postprocessor = load_policy(pretrained_dir, device)
 
+    if args.num_inference_steps is not None:
+        if args.num_inference_steps <= 0:
+            raise ValueError(f"--num-inference-steps must be positive, got {args.num_inference_steps}")
+        policy.diffusion.num_inference_steps = args.num_inference_steps
+
+    actual_num_inference_steps = policy.diffusion.num_inference_steps
     use_base = bool(policy.config.use_base)
     use_torque = args.use_torque
 
@@ -256,6 +268,7 @@ def main():
     rospy.loginfo(f"  control rate: {args.rate} Hz")
     rospy.loginfo(f"  use_base: {use_base}")
     rospy.loginfo(f"  use_torque: {use_torque}")
+    rospy.loginfo(f"  num_inference_steps: {actual_num_inference_steps}")
     rospy.loginfo(f"  smoothing: {enable_smoothing}, alpha={smoothing_alpha}")
     rospy.loginfo("=" * 70)
     rospy.loginfo("Waiting for sensor data...")
