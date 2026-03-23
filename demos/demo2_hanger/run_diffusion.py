@@ -44,6 +44,14 @@ NODE_NAME = "piper_diffusion_hanger"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
+DEFAULT_CKPT = (
+    PROJECT_ROOT
+    / "models"
+    / "DP-ACT-100-WHOLE-V30-fixed-base-bs64-200k-imagenet-resize224-nocrop-20260322-211630"
+    / "checkpoints"
+    / "200000"
+    / "pretrained_model"
+)
 
 latest_imgs = {
     "main": None,
@@ -144,11 +152,16 @@ def resolve_pretrained_path(ckpt_arg: str | None) -> Path:
             return candidate.parent
         if candidate.is_dir() and (candidate / "config.json").exists():
             return candidate
+        if candidate.is_dir() and (candidate / "pretrained_model" / "config.json").exists():
+            return candidate / "pretrained_model"
         if candidate.is_dir():
             nested = find_latest_pretrained_dir(candidate)
             if nested is not None:
                 return nested
         raise FileNotFoundError(f"Invalid checkpoint path: {candidate}")
+
+    if DEFAULT_CKPT.exists():
+        return DEFAULT_CKPT
 
     latest = find_latest_pretrained_dir(MODELS_DIR)
     if latest is None:
@@ -189,7 +202,12 @@ def load_policy(pretrained_dir: Path, device: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Diffusion Policy hanger deployment")
-    parser.add_argument("--ckpt", type=str, default=None, help="Path to pretrained_model directory or run directory")
+    parser.add_argument(
+        "--ckpt",
+        type=str,
+        default=None,
+        help=f"Path to pretrained_model directory or run directory (default: {DEFAULT_CKPT})",
+    )
     parser.add_argument("--rate", type=float, default=10.0, help="Control frequency in Hz")
     parser.add_argument("--use-torque", action="store_true", help="Feed real joint effort into observation.effort")
     parser.add_argument("--smoothing", type=float, default=0.3, help="EMA smoothing alpha")
