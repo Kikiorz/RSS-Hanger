@@ -23,6 +23,7 @@ Notes:
 """
 
 import argparse
+import time
 from pathlib import Path
 
 import cv2
@@ -261,6 +262,7 @@ def main():
 
     data_ready_logged = False
     step_count = 0
+    prev_step_wall_time = None
 
     global smoothed_action
 
@@ -320,6 +322,8 @@ def main():
                 effort_raw = np.zeros(14, dtype=np.float32)
             obs["observation.effort"] = effort_raw
 
+        step_wall_start = time.perf_counter()
+        infer_start = time.perf_counter()
         action_tensor = predict_action(
             observation=obs,
             policy=policy,
@@ -328,6 +332,7 @@ def main():
             postprocessor=postprocessor,
             use_amp=bool(policy.config.use_amp),
         )
+        infer_ms = (time.perf_counter() - infer_start) * 1000.0
 
         action = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
         if action.shape[0] != 17:
@@ -339,10 +344,14 @@ def main():
         action_left = action[3:10].copy()
         action_right = action[10:17].copy()
 
+        loop_dt_ms = None if prev_step_wall_time is None else (step_wall_start - prev_step_wall_time) * 1000.0
         step_count += 1
         if step_count <= 5 or step_count % 50 == 0:
             rospy.loginfo("=" * 70)
             rospy.loginfo(f"[DIAG] Step {step_count}")
+            rospy.loginfo(f"  Inference time:      {infer_ms:.1f} ms")
+            if loop_dt_ms is not None and loop_dt_ms > 0:
+                rospy.loginfo(f"  Loop dt / rate:      {loop_dt_ms:.1f} ms / {1000.0 / loop_dt_ms:.2f} Hz")
             rospy.loginfo(f"  Raw state LEFT:      {np.array2string(latest_q['left'], precision=3)}")
             rospy.loginfo(f"  Raw state RIGHT:     {np.array2string(latest_q['right'], precision=3)}")
             if policy.config.use_torque:
@@ -396,9 +405,10 @@ def main():
         msg_right.position = action_right.tolist()
         pub_right.publish(msg_right)
 
+        prev_step_wall_time = step_wall_start
         rospy.loginfo_throttle(
             2.0,
-            f"Actions sent (base={use_base}, torque={use_torque}, base_vx={action_base[0]:.4f})",
+            f"Actions sent (base={use_base}, torque={use_torque}, base_vx={action_base[0]:.4f}, infer_ms={infer_ms:.1f})",
         )
         rate.sleep()
 
