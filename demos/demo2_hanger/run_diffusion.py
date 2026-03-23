@@ -187,28 +187,11 @@ def load_policy(pretrained_dir: Path, device: str):
     return policy, preprocessor, postprocessor
 
 
-def resolve_torque_usage(policy: DiffusionPolicy, torque_mode: str) -> bool:
-    checkpoint_uses_torque = bool(policy.config.use_torque)
-
-    if torque_mode == "auto":
-        return checkpoint_uses_torque
-    if torque_mode == "on":
-        if not checkpoint_uses_torque:
-            raise ValueError("--torque-mode on requires a torque-enabled diffusion checkpoint")
-        return True
-    return False
-
-
 def main():
     parser = argparse.ArgumentParser(description="Diffusion Policy hanger deployment")
     parser.add_argument("--ckpt", type=str, default=None, help="Path to pretrained_model directory or run directory")
     parser.add_argument("--rate", type=float, default=10.0, help="Control frequency in Hz")
-    parser.add_argument(
-        "--torque-mode",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help="auto: follow checkpoint, on: require torque input, off: feed zero torque",
-    )
+    parser.add_argument("--use-torque", action="store_true", help="Feed real joint effort into observation.effort")
     parser.add_argument("--smoothing", type=float, default=0.3, help="EMA smoothing alpha")
     parser.add_argument("--no-smoothing", action="store_true", help="Disable EMA smoothing")
     args, _ = parser.parse_known_args()
@@ -222,10 +205,12 @@ def main():
     policy, preprocessor, postprocessor = load_policy(pretrained_dir, device)
 
     use_base = bool(policy.config.use_base)
-    use_torque = resolve_torque_usage(policy, args.torque_mode)
+    use_torque = args.use_torque
 
+    if use_torque and not policy.config.use_torque:
+        raise ValueError("--use-torque requires a torque-enabled checkpoint (policy.config.use_torque=True)")
     if policy.config.use_torque and not use_torque:
-        rospy.logwarn("Torque is disabled at runtime; observation.effort will be replaced with zeros.")
+        rospy.logwarn("Checkpoint was trained with torque but --use-torque not set; observation.effort will be zeros.")
 
     rospy.Subscriber("/realsense_top/color/image_raw/compressed", CompressedImage, cb_main, queue_size=1)
     rospy.Subscriber("/realsense_left/color/image_raw/compressed", CompressedImage, cb_secondary_0, queue_size=1)
@@ -307,8 +292,11 @@ def main():
             base_vel_raw = latest_base_velocity.astype(np.float32).copy()
             obs["observation.base_velocity"] = base_vel_raw
 
-        if use_torque:
-            effort_raw = np.concatenate([latest_effort["left"], latest_effort["right"]], axis=0).astype(np.float32)
+        if policy.config.use_torque:
+            if use_torque:
+                effort_raw = np.concatenate([latest_effort["left"], latest_effort["right"]], axis=0).astype(np.float32)
+            else:
+                effort_raw = np.zeros(14, dtype=np.float32)
             obs["observation.effort"] = effort_raw
 
         action_tensor = predict_action(
@@ -336,9 +324,12 @@ def main():
             rospy.loginfo(f"[DIAG] Step {step_count}")
             rospy.loginfo(f"  Raw state LEFT:      {np.array2string(latest_q['left'], precision=3)}")
             rospy.loginfo(f"  Raw state RIGHT:     {np.array2string(latest_q['right'], precision=3)}")
-            if use_torque:
-                rospy.loginfo(f"  Raw effort LEFT:     {np.array2string(latest_effort['left'], precision=3)}")
-                rospy.loginfo(f"  Raw effort RIGHT:    {np.array2string(latest_effort['right'], precision=3)}")
+            if policy.config.use_torque:
+                if use_torque:
+                    rospy.loginfo(f"  Raw effort LEFT:     {np.array2string(latest_effort['left'], precision=3)}")
+                    rospy.loginfo(f"  Raw effort RIGHT:    {np.array2string(latest_effort['right'], precision=3)}")
+                else:
+                    rospy.loginfo("  Effort:              zeros (--use-torque not set)")
             if use_base and base_vel_raw is not None:
                 rospy.loginfo(
                     f"  Raw base velocity:   vx={base_vel_raw[0]:.4f}, vy={base_vel_raw[1]:.4f}, omega={base_vel_raw[2]:.4f}"

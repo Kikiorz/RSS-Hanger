@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONWARNINGS="ignore"
 
 # ============== [DIFFUSION TRAINING - TORQUE] ==============
 # Whole-body Diffusion Policy training script with torque enabled.
@@ -14,22 +15,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-USE_BASE="${USE_BASE:-true}"
-USE_TORQUE="${USE_TORQUE:-true}"
+USE_BASE="${USE_BASE:-True}"
+USE_TORQUE="${USE_TORQUE:-True}"
 STEPS="${STEPS:-200000}"
 SAVE_FREQ="${SAVE_FREQ:-10000}"
 LOG_FREQ="${LOG_FREQ:-100}"
 EVAL_FREQ="${EVAL_FREQ:-0}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
-WANDB_ENABLE="${WANDB_ENABLE:-false}"
+WANDB_ENABLE="${WANDB_ENABLE:-False}"
 DEVICE="${DEVICE:-cuda}"
 PRETRAINED_BACKBONE_WEIGHTS="${PRETRAINED_BACKBONE_WEIGHTS:-ResNet18_Weights.IMAGENET1K_V1}"
-USE_GROUP_NORM="${USE_GROUP_NORM:-false}"
+USE_GROUP_NORM="${USE_GROUP_NORM:-False}"
 RESIZE_SHAPE="${RESIZE_SHAPE:-224,224}"
 CROP_RATIO="${CROP_RATIO:-1.0}"
-COMPILE_MODEL="${COMPILE_MODEL:-false}"
+COMPILE_MODEL="${COMPILE_MODEL:-False}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
-USE_AMP="${USE_AMP:-true}"
+USE_AMP="${USE_AMP:-True}"
 OPTIMIZER_LR="${OPTIMIZER_LR:-8e-5}"
 SCHEDULER_NAME="${SCHEDULER_NAME:-cosine}"
 SCHEDULER_WARMUP_STEPS="${SCHEDULER_WARMUP_STEPS:-2000}"
@@ -92,7 +93,7 @@ python "${PROJECT_ROOT}/lerobot/src/lerobot/scripts/lerobot_train.py" \
   --policy.crop_ratio "${CROP_RATIO}" \
   --policy.compile_model "${COMPILE_MODEL}" \
   --policy.repo_id "${POLICY_REPO_ID}" \
-  --policy.push_to_hub false \
+  --policy.push_to_hub False \
   --batch_size "${BATCH_SIZE}" \
   --steps "${STEPS}" \
   --log_freq "${LOG_FREQ}" \
