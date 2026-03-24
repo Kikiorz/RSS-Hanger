@@ -254,6 +254,17 @@ def save_debug_snapshot(
     return step_dir
 
 
+def safe_ros_time_now() -> rospy.Time:
+    try:
+        stamp = rospy.Time.now()
+        if stamp.secs < 0 or stamp.nsecs < 0:
+            raise ValueError(f"Negative ROS time: {stamp}")
+        return stamp
+    except Exception as exc:
+        rospy.logwarn_throttle(2.0, f"Falling back to wall-clock timestamp because ROS time is invalid: {exc}")
+        return rospy.Time.from_sec(max(time.time(), 0.0))
+
+
 def load_policy(pretrained_dir: Path, device: str):
     config = PreTrainedConfig.from_pretrained(pretrained_dir)
     if not isinstance(config, DiffusionConfig):
@@ -549,14 +560,16 @@ def main():
             cmd_vel.angular.z = 0.0
         pub_cmd_vel.publish(cmd_vel)
 
+        publish_stamp = safe_ros_time_now()
+
         msg_left = JointState()
-        msg_left.header.stamp = rospy.Time.now()
+        msg_left.header.stamp = publish_stamp
         msg_left.name = joint_names
         msg_left.position = action_left.tolist()
         pub_left.publish(msg_left)
 
         msg_right = JointState()
-        msg_right.header.stamp = rospy.Time.now()
+        msg_right.header.stamp = publish_stamp
         msg_right.name = joint_names
         msg_right.position = action_right.tolist()
         pub_right.publish(msg_right)
