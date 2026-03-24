@@ -589,7 +589,7 @@ def main():
             2.0,
             f"Actions sent (base={use_base}, torque={use_torque}, base_vx={action_base[0]:.4f}, infer_ms={infer_ms:.1f})",
         )
-        rate.sleep()
+        sleep_wall_clock(period_s, started_at=step_wall_start)
 
 
 if __name__ == "__main__":

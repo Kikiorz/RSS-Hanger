@@ -65,10 +65,10 @@ def nearest_idx(times, t):
 
 def extract_joint_array(msg, field_name, dim=JOINT_DIM):
     values = getattr(msg, field_name, [])
-    arr = np.asarray(values, dtype=np.float32)
+    arr = np.asarray(values, dtype=np.float64)
     if arr.shape[0] >= dim:
         return arr[:dim]
-    padded = np.zeros(dim, dtype=np.float32)
+    padded = np.zeros(dim, dtype=np.float64)
     padded[: arr.shape[0]] = arr
     return padded
 
@@ -80,7 +80,7 @@ def extract_base_velocity_from_odom(msg):
             float(msg.twist.twist.linear.y),
             float(msg.twist.twist.angular.z),
         ],
-        dtype=np.float32,
+        dtype=np.float64,
     )
 
 
@@ -220,8 +220,8 @@ def process_single_bag(args):
                 state_left_eff = extract_joint_array(state_left_msg, "effort")
                 state_right_eff = extract_joint_array(state_right_msg, "effort")
 
-                state_14d = np.concatenate([state_left_pos, state_right_pos]).astype(np.float32)
-                effort_14d = np.concatenate([state_left_eff, state_right_eff]).astype(np.float32)
+                state_14d = np.concatenate([state_left_pos, state_right_pos]).astype(np.float64)
+                effort_14d = np.concatenate([state_left_eff, state_right_eff]).astype(np.float64)
 
                 idx_odom = nearest_idx(odom_times, t_frame)
                 odom_msg = odom_msgs[idx_odom][1]
@@ -236,7 +236,7 @@ def process_single_bag(args):
 
                 action_base = base_velocity.copy()
 
-                action_17d = np.concatenate([action_base, action_left, action_right]).astype(np.float32)
+                action_17d = np.concatenate([action_base, action_left, action_right]).astype(np.float64)
 
                 frame = {
                     "observation.images.main": main_image,
@@ -271,25 +271,25 @@ if __name__ == "__main__":
 
     features = {
         "action": {
-            "dtype": "float32",
+            "dtype": "float64",
             "shape": (17,),
             "names": ["base_vx", "base_vy", "base_omega"]
             + [f"left_joint_{i}" for i in range(7)]
             + [f"right_joint_{i}" for i in range(7)],
         },
         "observation.state": {
-            "dtype": "float32",
+            "dtype": "float64",
             "shape": (14,),
             "names": [f"left_joint_{i}" for i in range(7)]
             + [f"right_joint_{i}" for i in range(7)],
         },
         "observation.base_velocity": {
-            "dtype": "float32",
+            "dtype": "float64",
             "shape": (3,),
             "names": ["base_vx", "base_vy", "base_omega"],
         },
         "observation.effort": {
-            "dtype": "float32",
+            "dtype": "float64",
             "shape": (14,),
             "names": [f"left_joint_{i}_eff" for i in range(7)]
             + [f"right_joint_{i}_eff" for i in range(7)],
