@@ -257,12 +257,22 @@ def save_debug_snapshot(
 def safe_ros_time_now() -> rospy.Time:
     try:
         stamp = rospy.Time.now()
-        if stamp.secs < 0 or stamp.nsecs < 0:
-            raise ValueError(f"Negative ROS time: {stamp}")
+        total_nsec = stamp.to_nsec()
+        if stamp.secs < 0 or stamp.nsecs < 0 or total_nsec < 0:
+            raise ValueError(f"Invalid ROS time: secs={stamp.secs}, nsecs={stamp.nsecs}, total_nsec={total_nsec}")
         return stamp
     except Exception as exc:
         rospy.logwarn_throttle(2.0, f"Falling back to wall-clock timestamp because ROS time is invalid: {exc}")
         return rospy.Time.from_sec(max(time.time(), 0.0))
+
+
+def sleep_wall_clock(period_s: float, started_at: float | None = None) -> None:
+    if started_at is None:
+        sleep_s = period_s
+    else:
+        sleep_s = period_s - (time.perf_counter() - started_at)
+    if sleep_s > 0:
+        time.sleep(sleep_s)
 
 
 def load_policy(pretrained_dir: Path, device: str):
@@ -371,7 +381,7 @@ def main():
     pub_right = rospy.Publisher("/robot/arm_right/vla_joint_cmd", JointState, queue_size=1)
     pub_cmd_vel = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
 
-    rate = rospy.Rate(args.rate)
+    period_s = 1.0 / args.rate
     enable_smoothing = not args.no_smoothing
     smoothing_alpha = args.smoothing
     joint_names = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7"]
@@ -397,19 +407,19 @@ def main():
 
     while not rospy.is_shutdown():
         if any(latest_imgs[cache_key] is None for cache_key in required_cache_keys):
-            rate.sleep()
+            sleep_wall_clock(period_s)
             continue
 
         if latest_q["left"] is None or latest_q["right"] is None:
-            rate.sleep()
+            sleep_wall_clock(period_s)
             continue
 
         if use_torque and (latest_effort["left"] is None or latest_effort["right"] is None):
-            rate.sleep()
+            sleep_wall_clock(period_s)
             continue
 
         if use_base and latest_base_velocity is None:
-            rate.sleep()
+            sleep_wall_clock(period_s)
             continue
 
         if not data_ready_logged:
@@ -503,7 +513,7 @@ def main():
             rospy.logwarn(f"Slow inference snapshot saved to {snapshot_dir}")
         if action.shape[0] != 17:
             rospy.logwarn(f"Invalid action dim: {action.shape[0]}, expected 17")
-            rate.sleep()
+            sleep_wall_clock(period_s)
             continue
 
         action_base = action[0:3].copy()

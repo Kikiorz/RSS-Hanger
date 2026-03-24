@@ -35,7 +35,6 @@ ACTION_LEFT = "/teleop/arm_left/joint_states_single"
 ACTION_RIGHT = "/teleop/arm_right/joint_states_single"
 
 ODOM_TOPIC = "/ranger_base_node/odom"
-TELEOP_CMD_VEL = "/teleop/cmd_vel"
 
 # ============================================================
 # SETTINGS
@@ -85,17 +84,6 @@ def extract_base_velocity_from_odom(msg):
     )
 
 
-def extract_base_action_from_cmd_vel(msg):
-    return np.array(
-        [
-            float(msg.linear.x),
-            float(msg.linear.y),
-            float(msg.angular.z),
-        ],
-        dtype=np.float32,
-    )
-
-
 def collect_bag_files():
     if not DATA_ROOT.exists():
         print(f"Warning: Data directory not found: {DATA_ROOT}")
@@ -128,8 +116,7 @@ def process_single_bag(args):
                 ACTION_RIGHT,
                 ODOM_TOPIC,
             }
-            optional_topics = {TELEOP_CMD_VEL}
-            interested_topics = required_topics | optional_topics
+            interested_topics = required_topics
             topic_to_msgs = {topic: [] for topic in interested_topics}
 
             connections = [c for c in reader.connections if c.topic in interested_topics]
@@ -149,7 +136,6 @@ def process_single_bag(args):
             action_left_msgs = topic_to_msgs[ACTION_LEFT]
             action_right_msgs = topic_to_msgs[ACTION_RIGHT]
             odom_msgs = topic_to_msgs[ODOM_TOPIC]
-            cmd_vel_msgs = topic_to_msgs[TELEOP_CMD_VEL]
 
             for topic, msgs in [
                 (CAM_MAIN, cam_main_msgs),
@@ -173,7 +159,6 @@ def process_single_bag(args):
             action_left_times = np.array([t for t, _ in action_left_msgs], dtype=np.int64)
             action_right_times = np.array([t for t, _ in action_right_msgs], dtype=np.int64)
             odom_times = np.array([t for t, _ in odom_msgs], dtype=np.int64)
-            cmd_vel_times = np.array([t for t, _ in cmd_vel_msgs], dtype=np.int64) if cmd_vel_msgs else None
 
             start_candidates = [
                 cam_main_times[0],
@@ -195,10 +180,6 @@ def process_single_bag(args):
                 action_right_times[-1],
                 odom_times[-1],
             ]
-            if cmd_vel_times is not None and len(cmd_vel_times) > 0:
-                start_candidates.append(cmd_vel_times[0])
-                end_candidates.append(cmd_vel_times[-1])
-
             t_start = max(start_candidates)
             t_end = min(end_candidates)
 
@@ -253,11 +234,7 @@ def process_single_bag(args):
                 action_left = extract_joint_array(action_left_msg, "position")
                 action_right = extract_joint_array(action_right_msg, "position")
 
-                if cmd_vel_times is not None and len(cmd_vel_times) > 0:
-                    idx_cmd = nearest_idx(cmd_vel_times, t_frame)
-                    action_base = extract_base_action_from_cmd_vel(cmd_vel_msgs[idx_cmd][1])
-                else:
-                    action_base = base_velocity.copy()
+                action_base = base_velocity.copy()
 
                 action_17d = np.concatenate([action_base, action_left, action_right]).astype(np.float32)
 
