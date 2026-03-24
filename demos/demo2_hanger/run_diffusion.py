@@ -6,8 +6,8 @@ This script keeps the existing ROS deployment skeleton but switches inference to
 LeRobot Diffusion Policy. It uses the checkpoint's saved preprocessor and
 postprocessor so deployment normalization stays aligned with training.
 
-Inputs:
-- 4 RGB cameras
+Inputs are derived from the loaded checkpoint:
+- observation.images.* from the checkpoint visual features
 - observation.state (14D)
 - observation.base_velocity (3D) when enabled by the checkpoint
 - observation.effort (14D) when enabled by the checkpoint or runtime flag
@@ -23,8 +23,13 @@ Notes:
 """
 
 import argparse
+import sys
 import time
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent.resolve()
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "lerobot" / "src"))
 
 import cv2
 import numpy as np
@@ -40,20 +45,19 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.utils.control_utils import predict_action
 
-IMAGE_SIZE = (224, 224)
+DEFAULT_IMAGE_SIZE = (224, 224)
 NODE_NAME = "piper_diffusion_hanger"
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
 DEFAULT_CKPT = (
-    PROJECT_ROOT
-    / "models"
-    / "DP-ACT-100-WHOLE-V30-fixed-base-bs64-200k-imagenet-resize224-nocrop-20260322-211630"
-    / "checkpoints"
-    / "200000"
-    / "pretrained_model"
+    PROJECT_ROOT / "models" / "diffusion_policy_official_base" / "checkpoints" / "200000" / "pretrained_model"
 )
+VISUAL_FEATURE_TO_CACHE_KEY = {
+    "observation.images.main": "main",
+    "observation.images.secondary_0": "secondary_0",
+    "observation.images.secondary_1": "secondary_1",
+    "observation.images.secondary_2": "secondary_2",
+}
 
 latest_imgs = {
     "main": None,
@@ -89,10 +93,10 @@ def decode_compressed_image(msg: CompressedImage) -> np.ndarray:
     return img_bgr
 
 
-def preprocess_image_for_policy(img_bgr: np.ndarray) -> np.ndarray:
+def preprocess_image_for_policy(img_bgr: np.ndarray, image_size: tuple[int, int]) -> np.ndarray:
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    if img_rgb.shape[:2] != IMAGE_SIZE:
-        img_rgb = cv2.resize(img_rgb, IMAGE_SIZE, interpolation=cv2.INTER_AREA)
+    if img_rgb.shape[:2] != image_size:
+        img_rgb = cv2.resize(img_rgb, image_size, interpolation=cv2.INTER_AREA)
     return np.ascontiguousarray(img_rgb)
 
 
@@ -189,6 +193,16 @@ def load_policy(pretrained_dir: Path, device: str):
         postprocessor_overrides={"device_processor": {"device": "cpu"}},
     )
 
+    visual_features = [key for key in policy.config.input_features if key.startswith("observation.images.")]
+    missing_visuals = [key for key in visual_features if key not in VISUAL_FEATURE_TO_CACHE_KEY]
+    if missing_visuals:
+        raise ValueError(f"Unsupported visual features in checkpoint: {missing_visuals}")
+
+    image_size = DEFAULT_IMAGE_SIZE
+    if visual_features:
+        first_visual = policy.config.input_features[visual_features[0]]
+        image_size = tuple(first_visual.shape[-2:])
+
     rospy.loginfo("=" * 70)
     rospy.loginfo("[INFO] Diffusion policy loaded successfully")
     rospy.loginfo(f"  checkpoint: {pretrained_dir}")
@@ -199,9 +213,11 @@ def load_policy(pretrained_dir: Path, device: str):
     rospy.loginfo(f"  n_action_steps: {policy.config.n_action_steps}")
     rospy.loginfo(f"  horizon: {policy.config.horizon}")
     rospy.loginfo(f"  use_amp: {policy.config.use_amp}")
+    rospy.loginfo(f"  visual_features: {visual_features}")
+    rospy.loginfo(f"  image_size: {image_size}")
     rospy.loginfo("=" * 70)
 
-    return policy, preprocessor, postprocessor
+    return policy, preprocessor, postprocessor, visual_features, image_size
 
 
 def main():
@@ -230,7 +246,7 @@ def main():
     device_t = torch.device(device)
 
     pretrained_dir = resolve_pretrained_path(args.ckpt)
-    policy, preprocessor, postprocessor = load_policy(pretrained_dir, device)
+    policy, preprocessor, postprocessor, visual_features, image_size = load_policy(pretrained_dir, device)
 
     if args.num_inference_steps is not None:
         if args.num_inference_steps <= 0:
@@ -240,6 +256,7 @@ def main():
     actual_num_inference_steps = policy.diffusion.num_inference_steps
     use_base = bool(policy.config.use_base)
     use_torque = args.use_torque
+    required_cache_keys = [VISUAL_FEATURE_TO_CACHE_KEY[key] for key in visual_features]
 
     if use_torque and not policy.config.use_torque:
         raise ValueError("--use-torque requires a torque-enabled checkpoint (policy.config.use_torque=True)")
@@ -280,11 +297,7 @@ def main():
     global smoothed_action
 
     while not rospy.is_shutdown():
-        if (
-            latest_imgs["main"] is None
-            or latest_imgs["secondary_0"] is None
-            or latest_imgs["secondary_1"] is None
-        ):
+        if any(latest_imgs[cache_key] is None for cache_key in required_cache_keys):
             rate.sleep()
             continue
 
@@ -304,24 +317,13 @@ def main():
             rospy.loginfo("All required sensors ready, starting inference...")
             data_ready_logged = True
 
-        main_img = preprocess_image_for_policy(latest_imgs["main"])
-        secondary_0 = preprocess_image_for_policy(latest_imgs["secondary_0"])
-        secondary_1 = preprocess_image_for_policy(latest_imgs["secondary_1"])
-        secondary_2 = (
-            preprocess_image_for_policy(latest_imgs["secondary_2"])
-            if latest_imgs["secondary_2"] is not None
-            else main_img
-        )
-
         state_raw = np.concatenate([latest_q["left"], latest_q["right"]], axis=0).astype(np.float32)
 
         obs = {
-            "observation.images.main": main_img,
-            "observation.images.secondary_0": secondary_0,
-            "observation.images.secondary_1": secondary_1,
-            "observation.images.secondary_2": secondary_2,
-            "observation.state": state_raw,
+            feature_name: preprocess_image_for_policy(latest_imgs[VISUAL_FEATURE_TO_CACHE_KEY[feature_name]], image_size)
+            for feature_name in visual_features
         }
+        obs["observation.state"] = state_raw
 
         base_vel_raw = None
         if use_base:

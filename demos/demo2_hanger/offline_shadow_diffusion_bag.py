@@ -14,16 +14,21 @@ from __future__ import annotations
 import argparse
 import math
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
+
+SCRIPT_DIR = Path(__file__).parent.resolve()
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "lerobot" / "src"))
 
 import cv2
 import numpy as np
 import torch
 from rosbags.highlevel import AnyReader
 from rosbags.rosbag2 import Writer
-from rosbags.typesys import Stores, get_typestore
+from rosbags.typesys import Stores, get_types_from_msg, get_typestore
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
@@ -48,8 +53,6 @@ DEBUG_ACTION_TOPIC = "/shadow/debug/action_raw"
 DEBUG_STATE_TOPIC = "/shadow/debug/observation_state"
 DEBUG_BASE_VEL_TOPIC = "/shadow/debug/observation_base_velocity"
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "ACTros2"
 
@@ -417,6 +420,18 @@ def add_connection_once(
     return connection_map[key]
 
 
+def ensure_ros2_msgtype_registered(reader: AnyReader, dst_typestore, src_msgtype: str) -> str:
+    msgtype = src_msgtype
+    if msgtype not in dst_typestore.fielddefs:
+        typs = get_types_from_msg(
+            reader.typestore.generate_msgdef(src_msgtype, ros_version=2)[0],
+            msgtype,
+        )
+        _ = typs.pop("std_msgs/msg/Header", None)
+        dst_typestore.register(typs)
+    return msgtype
+
+
 def flush_timestamp_group(
     group_timestamp_ns: int,
     group_items: list[tuple[object, bytes]],
@@ -429,6 +444,7 @@ def flush_timestamp_group(
     next_step_ns: int,
     replay_end_ns: int,
     step_ns: int,
+    ros2_copy_typestore,
 ) -> int:
     while next_step_ns < group_timestamp_ns and next_step_ns <= replay_end_ns:
         result = replay_runner.maybe_predict(next_step_ns)
@@ -437,9 +453,10 @@ def flush_timestamp_group(
         next_step_ns += step_ns
 
     for conn, raw in group_items:
-        writer_conn = add_connection_once(writer, writer_connections, conn.topic, conn.msgtype, reader.typestore)
+        msgtype = ensure_ros2_msgtype_registered(reader, ros2_copy_typestore, conn.msgtype)
+        writer_conn = add_connection_once(writer, writer_connections, conn.topic, msgtype, ros2_copy_typestore)
         msg = reader.deserialize(raw, conn.msgtype)
-        writer.write(writer_conn, group_timestamp_ns, reader.typestore.serialize_cdr(msg, conn.msgtype))
+        writer.write(writer_conn, group_timestamp_ns, ros2_copy_typestore.ros1_to_cdr(raw, msgtype))
         if conn.topic in replay_topics_set:
             replay_runner.update_from_message(conn.topic, msg)
 
@@ -537,6 +554,12 @@ def convert_bag(args: argparse.Namespace) -> None:
     replay_runner = ShadowReplayRunner(policy, preprocessor, postprocessor, device_t, args)
 
     with AnyReader([bag_path]) as reader, Writer(output_path, version=8) as writer:
+        ros2_copy_typestore = get_typestore(Stores.EMPTY)
+        ros2_copy_typestore.register({
+            **reader.typestore.fielddefs,
+            "std_msgs/msg/Header": get_typestore(Stores.ROS2_HUMBLE).fielddefs["std_msgs/msg/Header"],
+        })
+
         replay_connections = {
             CMD_VEL_TOPIC: writer.add_connection(CMD_VEL_TOPIC, "geometry_msgs/msg/Twist", typestore=ROS2_STORE),
             LEFT_CMD_TOPIC: writer.add_connection(LEFT_CMD_TOPIC, "sensor_msgs/msg/JointState", typestore=ROS2_STORE),
@@ -585,6 +608,7 @@ def convert_bag(args: argparse.Namespace) -> None:
                     next_step_ns=next_step_ns,
                     replay_end_ns=replay_end_ns,
                     step_ns=step_ns,
+                    ros2_copy_typestore=ros2_copy_typestore,
                 )
                 current_timestamp_ns = timestamp_ns
                 group_items = []
@@ -604,6 +628,7 @@ def convert_bag(args: argparse.Namespace) -> None:
                 next_step_ns=next_step_ns,
                 replay_end_ns=replay_end_ns,
                 step_ns=step_ns,
+                ros2_copy_typestore=ros2_copy_typestore,
             )
 
         while next_step_ns <= replay_end_ns:
