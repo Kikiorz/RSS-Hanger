@@ -23,8 +23,10 @@ Notes:
 """
 
 import argparse
+import json
 import sys
 import time
+import traceback
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -43,10 +45,12 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
+from lerobot.utils.constants import ACTION
 from lerobot.utils.control_utils import predict_action
 
 DEFAULT_IMAGE_SIZE = (224, 224)
 NODE_NAME = "piper_diffusion_hanger"
+DEFAULT_DEBUG_DIR = PROJECT_ROOT / "data" / "ACTros2" / "run_diffusion_debug"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 DEFAULT_CKPT = (
@@ -175,6 +179,81 @@ def resolve_pretrained_path(ckpt_arg: str | None) -> Path:
     return latest
 
 
+def summarize_array(arr: np.ndarray | None) -> dict | None:
+    if arr is None:
+        return None
+    arr_np = np.asarray(arr)
+    return {
+        "shape": list(arr_np.shape),
+        "min": float(arr_np.min()),
+        "max": float(arr_np.max()),
+        "mean": float(arr_np.mean()),
+        "std": float(arr_np.std()),
+    }
+
+
+def save_debug_snapshot(
+    debug_dir: Path | None,
+    *,
+    step_count: int,
+    reason: str,
+    visual_features: list[str],
+    obs: dict[str, np.ndarray],
+    latest_imgs_cache: dict[str, np.ndarray | None],
+    state_raw: np.ndarray,
+    base_vel_raw: np.ndarray | None,
+    effort_raw: np.ndarray | None,
+    action_raw: np.ndarray | None,
+    infer_ms: float | None,
+    loop_dt_ms: float | None,
+    chunk_refill: bool,
+    queue_len_before: int,
+    queue_len_after: int | None,
+    exc_text: str | None,
+    save_images: bool,
+) -> Path | None:
+    if debug_dir is None:
+        return None
+
+    step_dir = debug_dir / f"step_{step_count:06d}_{reason}"
+    step_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "step": step_count,
+        "reason": reason,
+        "chunk_refill": chunk_refill,
+        "queue_len_before": queue_len_before,
+        "queue_len_after": queue_len_after,
+        "infer_ms": infer_ms,
+        "loop_dt_ms": loop_dt_ms,
+        "visual_features": visual_features,
+        "state": summarize_array(state_raw),
+        "base_velocity": summarize_array(base_vel_raw),
+        "effort": summarize_array(effort_raw),
+        "action_raw": summarize_array(action_raw),
+        "obs": {key: summarize_array(value) for key, value in obs.items()},
+        "cache": {
+            key: None if value is None else {"shape": list(value.shape), "dtype": str(value.dtype)}
+            for key, value in latest_imgs_cache.items()
+        },
+        "exception": exc_text,
+        "wall_time": time.time(),
+    }
+    (step_dir / "snapshot.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    if save_images:
+        for feature_name in visual_features:
+            cache_key = VISUAL_FEATURE_TO_CACHE_KEY[feature_name]
+            raw_img = latest_imgs_cache.get(cache_key)
+            if raw_img is not None:
+                cv2.imwrite(str(step_dir / f"{cache_key}_raw_bgr.jpg"), raw_img)
+            policy_img = obs.get(feature_name)
+            if policy_img is not None:
+                cv2.imwrite(str(step_dir / f"{cache_key}_policy_rgb.jpg"), cv2.cvtColor(policy_img, cv2.COLOR_RGB2BGR))
+
+    return step_dir
+
+
 def load_policy(pretrained_dir: Path, device: str):
     config = PreTrainedConfig.from_pretrained(pretrained_dir)
     if not isinstance(config, DiffusionConfig):
@@ -238,6 +317,10 @@ def main():
     parser.add_argument("--use-torque", action="store_true", help="Feed real joint effort into observation.effort")
     parser.add_argument("--smoothing", type=float, default=0.3, help="EMA smoothing alpha")
     parser.add_argument("--no-smoothing", action="store_true", help="Disable EMA smoothing")
+    parser.add_argument("--debug-dir", type=str, default=str(DEFAULT_DEBUG_DIR), help="Directory to write debug snapshots")
+    parser.add_argument("--disable-debug-snapshots", action="store_true", help="Disable on-disk debug snapshot capture")
+    parser.add_argument("--debug-save-images", action="store_true", help="Save raw and preprocessed images in each debug snapshot")
+    parser.add_argument("--debug-log-slow-ms", type=float, default=300.0, help="Capture a snapshot when inference exceeds this latency")
     args, _ = parser.parse_known_args()
 
     rospy.init_node(NODE_NAME)
@@ -257,6 +340,9 @@ def main():
     use_base = bool(policy.config.use_base)
     use_torque = args.use_torque
     required_cache_keys = [VISUAL_FEATURE_TO_CACHE_KEY[key] for key in visual_features]
+    debug_dir = None if args.disable_debug_snapshots else Path(args.debug_dir).expanduser().resolve()
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
     if use_torque and not policy.config.use_torque:
         raise ValueError("--use-torque requires a torque-enabled checkpoint (policy.config.use_torque=True)")
@@ -287,6 +373,8 @@ def main():
     rospy.loginfo(f"  use_torque: {use_torque}")
     rospy.loginfo(f"  num_inference_steps: {actual_num_inference_steps}")
     rospy.loginfo(f"  smoothing: {enable_smoothing}, alpha={smoothing_alpha}")
+    rospy.loginfo(f"  debug_dir: {debug_dir}")
+    rospy.loginfo(f"  debug_log_slow_ms: {args.debug_log_slow_ms}")
     rospy.loginfo("=" * 70)
     rospy.loginfo("Waiting for sensor data...")
 
@@ -318,9 +406,10 @@ def main():
             data_ready_logged = True
 
         state_raw = np.concatenate([latest_q["left"], latest_q["right"]], axis=0).astype(np.float32)
+        latest_imgs_snapshot = {key: value for key, value in latest_imgs.items()}
 
         obs = {
-            feature_name: preprocess_image_for_policy(latest_imgs[VISUAL_FEATURE_TO_CACHE_KEY[feature_name]], image_size)
+            feature_name: preprocess_image_for_policy(latest_imgs_snapshot[VISUAL_FEATURE_TO_CACHE_KEY[feature_name]], image_size)
             for feature_name in visual_features
         }
         obs["observation.state"] = state_raw
@@ -330,6 +419,7 @@ def main():
             base_vel_raw = latest_base_velocity.astype(np.float32).copy()
             obs["observation.base_velocity"] = base_vel_raw
 
+        effort_raw = None
         if policy.config.use_torque:
             if use_torque:
                 effort_raw = np.concatenate([latest_effort["left"], latest_effort["right"]], axis=0).astype(np.float32)
@@ -338,18 +428,68 @@ def main():
             obs["observation.effort"] = effort_raw
 
         step_wall_start = time.perf_counter()
+        queue_len_before = len(policy._queues[ACTION])
+        chunk_refill = queue_len_before == 0
         infer_start = time.perf_counter()
-        action_tensor = predict_action(
-            observation=obs,
-            policy=policy,
-            device=device_t,
-            preprocessor=preprocessor,
-            postprocessor=postprocessor,
-            use_amp=bool(policy.config.use_amp),
-        )
-        infer_ms = (time.perf_counter() - infer_start) * 1000.0
+        action = None
+        try:
+            action_tensor = predict_action(
+                observation=obs,
+                policy=policy,
+                device=device_t,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                use_amp=bool(policy.config.use_amp),
+            )
+            infer_ms = (time.perf_counter() - infer_start) * 1000.0
+            action = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
+            queue_len_after = len(policy._queues[ACTION])
+        except Exception:
+            exc_text = traceback.format_exc()
+            snapshot_dir = save_debug_snapshot(
+                debug_dir,
+                step_count=step_count + 1,
+                reason="exception",
+                visual_features=visual_features,
+                obs=obs,
+                latest_imgs_cache=latest_imgs_snapshot,
+                state_raw=state_raw,
+                base_vel_raw=base_vel_raw,
+                effort_raw=effort_raw,
+                action_raw=action,
+                infer_ms=None,
+                loop_dt_ms=None if prev_step_wall_time is None else (step_wall_start - prev_step_wall_time) * 1000.0,
+                chunk_refill=chunk_refill,
+                queue_len_before=queue_len_before,
+                queue_len_after=None,
+                exc_text=exc_text,
+                save_images=args.debug_save_images,
+            )
+            rospy.logerr(f"Inference crashed at step {step_count + 1}. Debug snapshot: {snapshot_dir}")
+            rospy.logerr(exc_text)
+            raise
 
-        action = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
+        if infer_ms >= args.debug_log_slow_ms:
+            snapshot_dir = save_debug_snapshot(
+                debug_dir,
+                step_count=step_count + 1,
+                reason="slow",
+                visual_features=visual_features,
+                obs=obs,
+                latest_imgs_cache=latest_imgs_snapshot,
+                state_raw=state_raw,
+                base_vel_raw=base_vel_raw,
+                effort_raw=effort_raw,
+                action_raw=action,
+                infer_ms=infer_ms,
+                loop_dt_ms=None if prev_step_wall_time is None else (step_wall_start - prev_step_wall_time) * 1000.0,
+                chunk_refill=chunk_refill,
+                queue_len_before=queue_len_before,
+                queue_len_after=queue_len_after,
+                exc_text=None,
+                save_images=args.debug_save_images,
+            )
+            rospy.logwarn(f"Slow inference snapshot saved to {snapshot_dir}")
         if action.shape[0] != 17:
             rospy.logwarn(f"Invalid action dim: {action.shape[0]}, expected 17")
             rate.sleep()
@@ -364,6 +504,7 @@ def main():
         if step_count <= 5 or step_count % 50 == 0:
             rospy.loginfo("=" * 70)
             rospy.loginfo(f"[DIAG] Step {step_count}")
+            rospy.loginfo(f"  Chunk refill:        {chunk_refill} (queue_before={queue_len_before}, queue_after={queue_len_after})")
             rospy.loginfo(f"  Inference time:      {infer_ms:.1f} ms")
             if loop_dt_ms is not None and loop_dt_ms > 0:
                 rospy.loginfo(f"  Loop dt / rate:      {loop_dt_ms:.1f} ms / {1000.0 / loop_dt_ms:.2f} Hz")
